@@ -22,6 +22,8 @@ import org.apache.avro.Schema;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.engine.TaskContextSupplier;
 import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.common.metrics.Registry;
+import org.apache.hudi.common.model.HoodieObservabilityStat;
 import org.apache.hudi.common.model.HoodiePartitionMetadata;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordLocation;
@@ -29,6 +31,7 @@ import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.HoodieWriteStat.RuntimeStats;
 import org.apache.hudi.common.model.IOType;
+import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -42,8 +45,10 @@ import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.fs.Path;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import org.apache.spark.TaskContext;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -60,6 +65,8 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload, I, K, O> extends 
   protected long recordsDeleted = 0;
   private Map<String, HoodieRecord<T>> recordMap;
   private boolean useWriterSchema = false;
+  private HoodieTimer writeTimer = null;
+  private long cumulativeWriteTime = 0;
 
   public HoodieCreateHandle(HoodieWriteConfig config, String instantTime, HoodieTable<T, I, K, O> hoodieTable,
                             String partitionPath, String fileId, TaskContextSupplier taskContextSupplier) {
@@ -75,6 +82,7 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload, I, K, O> extends 
     writeStatus.setFileId(fileId);
     writeStatus.setPartitionPath(partitionPath);
 
+    this.writeTimer = new HoodieTimer();
     this.path = makeNewPath(partitionPath);
 
     try {
@@ -113,6 +121,7 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload, I, K, O> extends 
     Option recordMetadata = record.getData().getMetadata();
     try {
       if (avroRecord.isPresent()) {
+        writeTimer.startTimer();
         // Convert GenericRecord to GenericRecord with hoodie commit metadata in schema
         IndexedRecord recordWithMetadataInSchema = rewriteRecord((GenericRecord) avroRecord.get());
         fileWriter.writeAvroWithMetadata(recordWithMetadataInSchema, record);
@@ -120,6 +129,7 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload, I, K, O> extends 
         record.unseal();
         record.setNewLocation(new HoodieRecordLocation(instantTime, writeStatus.getFileId()));
         record.seal();
+        cumulativeWriteTime += writeTimer.endTimer();
         recordsWritten++;
         insertRecordsWritten++;
       } else {
@@ -195,6 +205,17 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload, I, K, O> extends 
       runtimeStats.setTotalCreateTime(timer.endTimer());
       stat.setRuntimeStats(runtimeStats);
       writeStatus.setStat(stat);
+
+      if (config.isMetricsOn() && config.shouldCollectObservabilityMetrics()) {
+        // record observability metrics
+        String tableName = hoodieTable.getMetaClient().getTableConfig().getTableName();
+        Option<Registry> observabilityRegistry = hoodieTable.getExecutorMetricsRegistry(
+            HoodieObservabilityStat.OBSERVABILITY_REGISTRY_NAME);
+        HoodieObservabilityStat observabilityStat = new HoodieObservabilityStat(observabilityRegistry, tableName,
+            HoodieObservabilityStat.WriteType.INSERT, InetAddress.getLocalHost().getHostName(),
+            TaskContext.get().stageId(), TaskContext.get().partitionId());
+        observabilityStat.recordWriteStats(recordsWritten, cumulativeWriteTime, fileSizeInBytes);
+      }
 
       LOG.info(String.format("CreateHandle for partitionPath %s fileID %s, took %d ms.", stat.getPartitionPath(),
           stat.getFileId(), runtimeStats.getTotalCreateTime()));

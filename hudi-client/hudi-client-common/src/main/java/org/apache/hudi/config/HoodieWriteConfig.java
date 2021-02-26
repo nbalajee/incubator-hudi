@@ -143,6 +143,9 @@ public class HoodieWriteConfig extends DefaultHoodieConfig {
   public static final String CLIENT_HEARTBEAT_NUM_TOLERABLE_MISSES_PROP = "hoodie.client.heartbeat.tolerable.misses";
   public static final Integer DEFAULT_CLIENT_HEARTBEAT_NUM_TOLERABLE_MISSES = 2;
 
+  public static final String COLLECT_OBSERVABILITY_METRICS = "hoodie.collect.observability.metrics";
+  public static final String DEFAULT_COLLECT_OBSERVABILITY_METRICS = "true";
+
   /**
    * HUDI-858 : There are users who had been directly using RDD APIs and have relied on a behavior in 0.4.x to allow
    * multiple write operations (upsert/buk-insert/...) to be executed within a single commit.
@@ -728,6 +731,10 @@ public class HoodieWriteConfig extends DefaultHoodieConfig {
     return Boolean.parseBoolean(props.getProperty(HoodieMetricsConfig.METRICS_ON));
   }
 
+  public Boolean shouldCollectObservabilityMetrics() {
+    return Boolean.parseBoolean(props.getProperty(COLLECT_OBSERVABILITY_METRICS));
+  }
+
   public boolean isExecutorMetricsEnabled() {
     return Boolean.parseBoolean(props.getProperty(HoodieMetricsConfig.ENABLE_EXECUTOR_METRICS, "false"));
   }
@@ -1241,6 +1248,11 @@ public class HoodieWriteConfig extends DefaultHoodieConfig {
       return this;
     }
 
+    public Builder withCollectObservabilityMetrics(boolean enabled) {
+      props.setProperty(COLLECT_OBSERVABILITY_METRICS, String.valueOf(enabled));
+      return this;
+    }
+
     protected void setDefaults() {
       // Check for mandatory properties
       setDefaultOnCondition(props, !props.containsKey(INSERT_PARALLELISM), INSERT_PARALLELISM, DEFAULT_PARALLELISM);
@@ -1296,6 +1308,8 @@ public class HoodieWriteConfig extends DefaultHoodieConfig {
           CLIENT_HEARTBEAT_INTERVAL_IN_MS_PROP, String.valueOf(DEFAULT_CLIENT_HEARTBEAT_INTERVAL_IN_MS));
       setDefaultOnCondition(props, !props.containsKey(CLIENT_HEARTBEAT_NUM_TOLERABLE_MISSES_PROP),
           CLIENT_HEARTBEAT_NUM_TOLERABLE_MISSES_PROP, String.valueOf(DEFAULT_CLIENT_HEARTBEAT_NUM_TOLERABLE_MISSES));
+      setDefaultOnCondition(props, !props.containsKey(COLLECT_OBSERVABILITY_METRICS),
+          COLLECT_OBSERVABILITY_METRICS, DEFAULT_COLLECT_OBSERVABILITY_METRICS);
 
       // Make sure the props is propagated
       setDefaultOnCondition(props, !isIndexConfigSet, HoodieIndexConfig.newBuilder().withEngineType(engineType).fromProperties(props).build());

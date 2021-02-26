@@ -195,6 +195,11 @@
       <artifactId>junit-platform-commons</artifactId>
       <scope>test</scope>
     </dependency>
+      <dependency>
+          <groupId>org.apache.spark</groupId>
+          <artifactId>spark-core_2.11</artifactId>
+          <scope>compile</scope>
+      </dependency>
   </dependencies>
 
   <build>

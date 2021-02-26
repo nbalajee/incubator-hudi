@@ -39,6 +39,7 @@ import org.apache.hudi.common.fs.ConsistencyGuard.FileVisibility;
 import org.apache.hudi.common.fs.ConsistencyGuardConfig;
 import org.apache.hudi.common.fs.FailSafeConsistencyGuard;
 import org.apache.hudi.common.fs.OptimisticConsistencyGuard;
+import org.apache.hudi.common.metrics.Registry;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecordPayload;
@@ -73,6 +74,7 @@ import org.apache.log4j.Logger;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -101,6 +103,9 @@ public abstract class HoodieTable<T extends HoodieRecordPayload, I, K, O> implem
 
   private transient FileSystemViewManager viewManager;
   protected final transient HoodieEngineContext context;
+
+  // Metric registries to be sent to executors
+  private Map<String, Registry> executorMetricRegistryMap = new HashMap<>();
 
   protected HoodieTable(HoodieWriteConfig config, HoodieEngineContext context, HoodieTableMetaClient metaClient) {
     this.config = config;
@@ -657,5 +662,13 @@ public abstract class HoodieTable<T extends HoodieRecordPayload, I, K, O> implem
     // This is to handle scenarios where this is called at the executor tasks which do not have access
     // to engine context, and it ends up being null (as its not serializable and marked transient here).
     return context == null ? new HoodieLocalEngineContext(hadoopConfiguration.get()) : context;
+  }
+
+  public final void setExecutorMetricsRegistry(String name, Registry registry) {
+    executorMetricRegistryMap.put(name,  registry);
+  }
+
+  public final Option<Registry> getExecutorMetricsRegistry(String name) {
+    return Option.ofNullable(executorMetricRegistryMap.get(name));
   }
 }

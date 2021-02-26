@@ -32,11 +32,13 @@ import org.apache.hudi.common.testutils.Transformations;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ParquetUtils;
 import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.config.HoodieMetricsConfig;
 import org.apache.hudi.config.HoodieStorageConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.hadoop.HoodieParquetInputFormat;
 import org.apache.hudi.hadoop.utils.HoodieHiveUtils;
 import org.apache.hudi.io.HoodieCreateHandle;
+import org.apache.hudi.metrics.HoodieObservabilityMetrics;
 import org.apache.hudi.table.HoodieSparkCopyOnWriteTable;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
@@ -455,5 +457,71 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
   @ValueSource(strings = {"global_sort", "partition_sort", "none"})
   public void testBulkInsertRecordsWithGlobalSort(String bulkInsertMode) throws Exception {
     testBulkInsertRecords(bulkInsertMode);
+  }
+
+  @Test
+  public void testObservabilityMetricsOnCOW() throws Exception {
+    // config with metrics enabled
+    HoodieWriteConfig config = HoodieWriteConfig.newBuilder().withPath(basePath).withSchema(SCHEMA.toString())
+        .withMetricsConfig(HoodieMetricsConfig.newBuilder().on(true).build()).build();
+    String firstCommitTime = makeNewCommitTime();
+    SparkRDDWriteClient writeClient = getHoodieWriteClient(config);
+    writeClient.startCommitWithTime(firstCommitTime);
+    metaClient = HoodieTableMetaClient.reload(metaClient);
+
+    String partitionPath = "2016/01/31";
+    HoodieSparkCopyOnWriteTable table = (HoodieSparkCopyOnWriteTable) HoodieSparkTable.create(config, context, metaClient);
+
+    // Get some records belong to the same partition (2016/01/31)
+    String recordStr1 = "{\"_row_key\":\"8eb5b87a-1feh-4edd-87b4-6ec96dc405a0\","
+        + "\"time\":\"2016-01-31T03:16:41.415Z\",\"number\":12}";
+    String recordStr2 = "{\"_row_key\":\"8eb5b87b-1feu-4edd-87b4-6ec96dc405a0\","
+        + "\"time\":\"2016-01-31T03:20:41.415Z\",\"number\":100}";
+    String recordStr3 = "{\"_row_key\":\"8eb5b87c-1fej-4edd-87b4-6ec96dc405a0\","
+        + "\"time\":\"2016-01-31T03:16:41.415Z\",\"number\":15}";
+    String recordStr4 = "{\"_row_key\":\"8eb5b87d-1fej-4edd-87b4-6ec96dc405a0\","
+        + "\"time\":\"2016-01-31T03:16:41.415Z\",\"number\":51}";
+
+    List<HoodieRecord> records = new ArrayList<>();
+    RawTripTestPayload rowChange1 = new RawTripTestPayload(recordStr1);
+    records.add(new HoodieRecord(new HoodieKey(rowChange1.getRowKey(), rowChange1.getPartitionPath()), rowChange1));
+    RawTripTestPayload rowChange2 = new RawTripTestPayload(recordStr2);
+    records.add(new HoodieRecord(new HoodieKey(rowChange2.getRowKey(), rowChange2.getPartitionPath()), rowChange2));
+    RawTripTestPayload rowChange3 = new RawTripTestPayload(recordStr3);
+    records.add(new HoodieRecord(new HoodieKey(rowChange3.getRowKey(), rowChange3.getPartitionPath()), rowChange3));
+
+    // Insert new records
+    final HoodieSparkCopyOnWriteTable cowTable = table;
+    writeClient.insert(jsc.parallelize(records, 1), firstCommitTime);
+
+    FileStatus[] allFiles = getIncrementalFiles(partitionPath, "0", -1);
+    assertEquals(1, allFiles.length);
+
+    // Check Stats are reported to registry
+    HoodieObservabilityMetrics observabilityRegistry = writeClient.getHoodieObservabilityMetrics();
+    Map<String, Long> metrics = observabilityRegistry.getAllCounts();
+    assertEquals(3, metrics.get("raw_trips.consolidated.totalRecordsWritten.INSERT"));
+
+    // We update the 1st record & add a new record
+    String updateRecordStr1 = "{\"_row_key\":\"8eb5b87a-1feh-4edd-87b4-6ec96dc405a0\","
+        + "\"time\":\"2016-01-31T03:16:41.415Z\",\"number\":15}";
+    RawTripTestPayload updateRowChanges1 = new RawTripTestPayload(updateRecordStr1);
+    HoodieRecord updatedRecord1 = new HoodieRecord(
+        new HoodieKey(updateRowChanges1.getRowKey(), updateRowChanges1.getPartitionPath()), updateRowChanges1);
+
+    RawTripTestPayload rowChange4 = new RawTripTestPayload(recordStr4);
+    HoodieRecord insertedRecord1 =
+        new HoodieRecord(new HoodieKey(rowChange4.getRowKey(), rowChange4.getPartitionPath()), rowChange4);
+
+    List<HoodieRecord> updatedRecords = Arrays.asList(updatedRecord1, insertedRecord1);
+
+    Thread.sleep(1000);
+    String newCommitTime = makeNewCommitTime();
+    metaClient = HoodieTableMetaClient.reload(metaClient);
+    writeClient.startCommitWithTime(newCommitTime);
+    List<WriteStatus> statuses = writeClient.upsert(jsc.parallelize(updatedRecords), newCommitTime).collect();
+
+    metrics = observabilityRegistry.getAllCounts();
+    assertEquals(4, metrics.get("raw_trips.consolidated.totalRecordsWritten.UPSERT"));
   }
 }

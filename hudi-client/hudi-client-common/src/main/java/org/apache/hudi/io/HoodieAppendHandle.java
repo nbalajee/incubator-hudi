@@ -22,11 +22,13 @@ import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.engine.TaskContextSupplier;
 import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.common.metrics.Registry;
 import org.apache.hudi.common.model.BaseFile;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieDeltaWriteStat;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieLogFile;
+import org.apache.hudi.common.model.HoodieObservabilityStat;
 import org.apache.hudi.common.model.HoodiePartitionMetadata;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordLocation;
@@ -42,6 +44,7 @@ import org.apache.hudi.common.table.log.block.HoodieLogBlock;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock.HeaderMetadataType;
 import org.apache.hudi.common.table.view.TableFileSystemView.SliceView;
 import org.apache.hudi.common.util.DefaultSizeEstimator;
+import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.SizeEstimator;
@@ -55,8 +58,10 @@ import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.fs.Path;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import org.apache.spark.TaskContext;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -107,6 +112,8 @@ public class HoodieAppendHandle<T extends HoodieRecordPayload, I, K, O> extends 
   // Header metadata for a log block
   private final Map<HeaderMetadataType, String> header = new HashMap<>();
   private SizeEstimator<HoodieRecord> sizeEstimator;
+  private long cumulativeWriteTime = 0;
+  private HoodieTimer writeTimer = null;
 
   public HoodieAppendHandle(HoodieWriteConfig config, String instantTime, HoodieTable<T, I, K, O> hoodieTable,
                             String partitionPath, String fileId, Iterator<HoodieRecord<T>> recordItr, TaskContextSupplier taskContextSupplier) {
@@ -115,6 +122,7 @@ public class HoodieAppendHandle<T extends HoodieRecordPayload, I, K, O> extends 
     this.recordItr = recordItr;
     sizeEstimator = new DefaultSizeEstimator();
     this.statuses = new ArrayList<>();
+    this.writeTimer = new HoodieTimer();
   }
 
   public HoodieAppendHandle(HoodieWriteConfig config, String instantTime, HoodieTable<T, I, K, O> hoodieTable,
@@ -182,6 +190,7 @@ public class HoodieAppendHandle<T extends HoodieRecordPayload, I, K, O> extends 
     Option<Map<String, String>> recordMetadata = hoodieRecord.getData().getMetadata();
     try {
       Option<IndexedRecord> avroRecord = hoodieRecord.getData().getInsertValue(writerSchema);
+      writeTimer.startTimer();
       if (avroRecord.isPresent()) {
         // Convert GenericRecord to GenericRecord with hoodie commit metadata in schema
         avroRecord = Option.of(rewriteRecord((GenericRecord) avroRecord.get()));
@@ -206,8 +215,10 @@ public class HoodieAppendHandle<T extends HoodieRecordPayload, I, K, O> extends 
       // part of marking
       // record successful.
       hoodieRecord.deflate();
+      cumulativeWriteTime += writeTimer.endTimer();
       return avroRecord;
     } catch (Exception e) {
+      cumulativeWriteTime += writeTimer.endTimer();
       LOG.error("Error writing record  " + hoodieRecord, e);
       writeStatus.markFailure(hoodieRecord, e, recordMetadata);
     }
@@ -377,9 +388,21 @@ public class HoodieAppendHandle<T extends HoodieRecordPayload, I, K, O> extends 
         writer.close();
 
         // update final size, once for all log files
+        long totalLogFileSize = 0;
         for (WriteStatus status: statuses) {
           long logFileSize = FSUtils.getFileSize(fs, new Path(config.getBasePath(), status.getStat().getPath()));
           status.getStat().setFileSizeInBytes(logFileSize);
+          totalLogFileSize += logFileSize;
+        }
+
+        if (config.isMetricsOn() && config.shouldCollectObservabilityMetrics()) {
+          // record observability metrics
+          String tableName = hoodieTable.getMetaClient().getTableConfig().getTableName();
+          Option<Registry> observabilityRegistry = hoodieTable.getExecutorMetricsRegistry(HoodieObservabilityStat.OBSERVABILITY_REGISTRY_NAME);
+          HoodieObservabilityStat observabilityStat = new HoodieObservabilityStat(observabilityRegistry, tableName,
+              HoodieObservabilityStat.WriteType.UPDATE, InetAddress.getLocalHost().getHostName(),
+              TaskContext.get().stageId(), TaskContext.get().partitionId());
+          observabilityStat.recordWriteStats(recordsWritten, cumulativeWriteTime, totalLogFileSize);
         }
       }
       return statuses;

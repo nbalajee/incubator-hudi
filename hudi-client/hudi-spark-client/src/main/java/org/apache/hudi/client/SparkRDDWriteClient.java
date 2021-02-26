@@ -27,6 +27,7 @@ import org.apache.hudi.common.fs.HoodieWrapperFileSystem;
 import org.apache.hudi.common.metrics.Registry;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieKey;
+import org.apache.hudi.common.model.HoodieObservabilityStat;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieReplaceCommitMetadata;
@@ -47,6 +48,7 @@ import org.apache.hudi.index.SparkHoodieIndex;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metrics.DistributedRegistry;
 import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
+import org.apache.hudi.metrics.HoodieObservabilityMetrics;
 import org.apache.hudi.table.BulkInsertPartitioner;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
@@ -70,25 +72,32 @@ public class SparkRDDWriteClient<T extends HoodieRecordPayload> extends
     AbstractHoodieWriteClient<T, JavaRDD<HoodieRecord<T>>, JavaRDD<HoodieKey>, JavaRDD<WriteStatus>> {
 
   private static final Logger LOG = LogManager.getLogger(SparkRDDWriteClient.class);
+  protected final transient HoodieObservabilityMetrics observabilityMetrics;
 
   public SparkRDDWriteClient(HoodieEngineContext context, HoodieWriteConfig clientConfig) {
-    super(context, clientConfig);
+    this(context, clientConfig, Option.empty());
   }
 
   @Deprecated
   public SparkRDDWriteClient(HoodieEngineContext context, HoodieWriteConfig writeConfig, boolean rollbackPending) {
-    super(context, writeConfig);
+    this(context, writeConfig, rollbackPending, Option.empty());
   }
 
   @Deprecated
   public SparkRDDWriteClient(HoodieEngineContext context, HoodieWriteConfig writeConfig, boolean rollbackPending,
                              Option<EmbeddedTimelineService> timelineService) {
     super(context, writeConfig, timelineService);
+    this.observabilityMetrics = (HoodieObservabilityMetrics) Registry.getRegistry(
+        HoodieObservabilityStat.OBSERVABILITY_REGISTRY_NAME, HoodieObservabilityMetrics.class.getName());
+    observabilityMetrics.registerWithSpark(context, config);
   }
 
   public SparkRDDWriteClient(HoodieEngineContext context, HoodieWriteConfig writeConfig,
                              Option<EmbeddedTimelineService> timelineService) {
     super(context, writeConfig, timelineService);
+    this.observabilityMetrics = (HoodieObservabilityMetrics) Registry.getRegistry(
+        HoodieObservabilityStat.OBSERVABILITY_REGISTRY_NAME, HoodieObservabilityMetrics.class.getName());
+    observabilityMetrics.registerWithSpark(context, config);
   }
 
   /**
@@ -395,6 +404,9 @@ public class SparkRDDWriteClient<T extends HoodieRecordPayload> extends
     } else {
       writeTimer = metrics.getDeltaCommitCtx();
     }
+    if (config.isMetricsOn() && config.shouldCollectObservabilityMetrics()) {
+      table.setExecutorMetricsRegistry(HoodieObservabilityStat.OBSERVABILITY_REGISTRY_NAME, observabilityMetrics);
+    }
     return table;
   }
 
@@ -430,5 +442,9 @@ public class SparkRDDWriteClient<T extends HoodieRecordPayload> extends
 
       HoodieWrapperFileSystem.setMetricsRegistry(registry, registryMeta);
     }
+  }
+
+  public HoodieObservabilityMetrics getHoodieObservabilityMetrics() {
+    return observabilityMetrics;
   }
 }
